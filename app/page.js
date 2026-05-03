@@ -152,75 +152,132 @@ export default function ReceiptGeneratorPage() {
     );
   };
 
-  // === CSV/TSV paste handler ===
-  // Accepts comma or tab separated. Tries to auto-detect column order:
-  // - If first row has headers like "campaign,impressions,amount", use those
-  // - Otherwise assume order: campaign, impressions, amount, [notes]
-  const handlePaste = () => {
-    if (!pasteText.trim()) return;
-    try {
-      // Detect delimiter: if more tabs than commas in first line, use tab
-      const firstLine = pasteText.split("\n")[0];
-      const tabCount = (firstLine.match(/\t/g) || []).length;
-      const commaCount = (firstLine.match(/,/g) || []).length;
-      const delimiter = tabCount > commaCount ? "\t" : ",";
+  // === CSV/TSV/file import handler ===
+  // Smart parser: handles files, pastes, comma/tab/semicolon delimiters, and
+  // a wide variety of header names from real exports (Meta Ads Manager,
+  // spreadsheets, etc.). Falls back to positional mapping if no headers found.
+  const parseAndImport = (rawText) => {
+    if (!rawText || !rawText.trim()) {
+      alert("Nothing to import. Paste data or pick a file first.");
+      return;
+    }
 
-      const parsed = Papa.parse(pasteText.trim(), {
+    try {
+      // Auto-detect delimiter from the first line: tab > semicolon > comma
+      const firstLine = rawText.split(/\r?\n/)[0];
+      const tabCount = (firstLine.match(/\t/g) || []).length;
+      const semiCount = (firstLine.match(/;/g) || []).length;
+      const commaCount = (firstLine.match(/,/g) || []).length;
+      let delimiter = ",";
+      if (tabCount > commaCount && tabCount > semiCount) delimiter = "\t";
+      else if (semiCount > commaCount) delimiter = ";";
+
+      const parsed = Papa.parse(rawText.trim(), {
         delimiter,
-        skipEmptyLines: true,
+        skipEmptyLines: "greedy",
       });
 
-      const rows = parsed.data;
+      const rows = parsed.data.filter((r) => r.some((c) => String(c).trim() !== ""));
       if (!rows.length) {
-        alert("No data found.");
+        alert("No data rows found. The file/paste might be empty or in a format I don't recognize.");
         return;
       }
 
-      // Detect header row
-      const firstRow = rows[0].map((c) => String(c).toLowerCase().trim());
-      const hasHeader =
-        firstRow.includes("campaign") ||
-        firstRow.includes("name") ||
-        firstRow.includes("impressions") ||
-        firstRow.includes("amount") ||
-        firstRow.includes("spend");
+      // Substring-based header detection — works with "Campaign Name", "Amount Spent (MYR)", etc.
+      const matchesAny = (text, patterns) => {
+        const t = String(text).toLowerCase().trim();
+        return patterns.some((p) => t === p || t.includes(p));
+      };
+      const detectColumn = (headerRow, patterns) => {
+        return headerRow.findIndex((h) => matchesAny(h, patterns));
+      };
 
-      let dataRows = hasHeader ? rows.slice(1) : rows;
-      let columnMap = { campaign: 0, impressions: 1, amount: 2, notes: 3 };
+      const headerCandidate = rows[0].map((c) => String(c).toLowerCase().trim());
+
+      // Try to map columns by name first
+      const namedMap = {
+        campaign: detectColumn(headerCandidate, ["campaign name", "campaign", "ad set name", "ad name", "name"]),
+        impressions: detectColumn(headerCandidate, ["impressions", "impr.", "impr", "imp"]),
+        amount: detectColumn(headerCandidate, ["amount spent", "amount", "spend", "spent", "cost", "total spent"]),
+        notes: detectColumn(headerCandidate, ["notes", "note", "ad set", "label"]),
+      };
+
+      // Header row is real if at least campaign + amount columns were found by name
+      const hasHeader = namedMap.campaign >= 0 && namedMap.amount >= 0;
+
+      let columnMap;
+      let dataRows;
 
       if (hasHeader) {
-        // Map by column name
-        const headerRow = rows[0].map((c) => String(c).toLowerCase().trim());
-        columnMap = {
-          campaign: headerRow.findIndex((h) => h === "campaign" || h === "name"),
-          impressions: headerRow.findIndex((h) => h === "impressions" || h === "impr"),
-          amount: headerRow.findIndex((h) => h === "amount" || h === "spend" || h === "spent"),
-          notes: headerRow.findIndex((h) => h === "notes" || h === "note"),
-        };
+        columnMap = namedMap;
+        dataRows = rows.slice(1);
+      } else {
+        // Fall back to positional: assume order is [campaign, impressions, amount, notes]
+        // Try to be smart: if first column has letters and second/third are numeric,
+        // we're probably looking at data without a header
+        columnMap = { campaign: 0, impressions: 1, amount: 2, notes: 3 };
+        dataRows = rows;
       }
 
+      // Build the new rows
       const newRows = dataRows
-        .filter((r) => r[columnMap.campaign])
         .map((r) => ({
-          id: crypto.randomUUID(),
           campaign: String(r[columnMap.campaign] || "").trim(),
-          impressions: columnMap.impressions >= 0 ? String(r[columnMap.impressions] || "").replace(/[,\s]/g, "") : "",
-          amount: columnMap.amount >= 0 ? String(r[columnMap.amount] || "").replace(/[^0-9.\-]/g, "") : "",
+          // Strip thousands separators and units from numbers
+          impressions: columnMap.impressions >= 0
+            ? String(r[columnMap.impressions] || "").replace(/[^0-9.\-]/g, "")
+            : "",
+          amount: columnMap.amount >= 0
+            ? String(r[columnMap.amount] || "").replace(/[^0-9.\-]/g, "")
+            : "",
           notes: columnMap.notes >= 0 ? String(r[columnMap.notes] || "").trim() : "",
-        }));
+        }))
+        .filter((r) => r.campaign && r.amount); // must have at least name + amount
 
       if (!newRows.length) {
-        alert("Couldn't parse any rows. Make sure the data has campaign + amount columns.");
+        // Provide a helpful diagnostic
+        const sampleHeader = rows[0].slice(0, 6).join(" | ");
+        const sampleData = rows[1] ? rows[1].slice(0, 6).join(" | ") : "(no data row)";
+        alert(
+          "Couldn't extract any rows.\n\n" +
+          `Detected delimiter: "${delimiter === "\t" ? "TAB" : delimiter}"\n` +
+          `Header row: ${sampleHeader}\n` +
+          `First data row: ${sampleData}\n\n` +
+          "Make sure your data has at least:\n" +
+          "• A column named 'Campaign' / 'Campaign Name' / 'Name'\n" +
+          "• A column named 'Amount' / 'Spend' / 'Amount Spent'\n\n" +
+          "Or, if no headers, put columns in this order:\n" +
+          "campaign, impressions, amount, notes"
+        );
         return;
       }
 
-      setCampaigns(newRows);
+      setCampaigns(newRows.map((r) => ({ ...r, id: crypto.randomUUID() })));
       setPasteText("");
       setShowPasteArea(false);
       setSavedToast(true);
-      setTimeout(() => setSavedToast(false), 2000);
+      setTimeout(() => setSavedToast(false), 2500);
     } catch (err) {
+      console.error("CSV parse error:", err);
       alert("Parse error: " + (err?.message || err));
+    }
+  };
+
+  // Paste-button handler
+  const handlePaste = () => parseAndImport(pasteText);
+
+  // File-upload handler — reads .csv / .tsv / .txt as text and runs through parser
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      parseAndImport(text);
+    } catch (err) {
+      alert("Could not read file: " + (err?.message || err));
+    } finally {
+      // Reset the input so the same file can be re-uploaded
+      e.target.value = "";
     }
   };
 
