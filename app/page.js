@@ -8,6 +8,7 @@ import {
   Trash2,
   RefreshCw,
   ClipboardPaste,
+  Upload,
   Sparkles,
   AlertCircle,
   Check,
@@ -564,7 +565,17 @@ export default function ReceiptGeneratorPage() {
                   Campaign Entries
                   <span className="text-[11px] font-normal text-slate-500">({campaigns.filter((r) => r.campaign).length})</span>
                 </h2>
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
+                  <label className="text-[11px] px-2.5 py-1.5 rounded-md bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center gap-1.5 cursor-pointer">
+                    <Upload className="w-3 h-3" />
+                    Upload CSV
+                    <input
+                      type="file"
+                      accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values,text/plain"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                  </label>
                   <button
                     onClick={() => setShowPasteArea((v) => !v)}
                     className="text-[11px] px-2.5 py-1.5 rounded-md bg-violet-500/10 hover:bg-violet-500/20 text-violet-300 border border-violet-500/30 flex items-center gap-1.5"
@@ -586,13 +597,14 @@ export default function ReceiptGeneratorPage() {
               {showPasteArea && (
                 <div className="mb-4 p-3 bg-slate-900/40 border border-slate-800/60 rounded-lg">
                   <p className="text-[11px] text-slate-400 mb-2">
-                    Paste CSV or TSV (tab-separated). Auto-detects header row. Expected columns: campaign, impressions, amount, [notes]
+                    Paste CSV, TSV (tab-separated), or copy-paste from Excel/Google Sheets.
+                    Auto-detects delimiter and header row. Recognized columns: <code className="text-cyan-300">Campaign / Campaign Name / Name</code>, <code className="text-cyan-300">Impressions</code>, <code className="text-cyan-300">Amount / Spend / Amount Spent</code>, <code className="text-cyan-300">Notes</code> (optional).
                   </p>
                   <textarea
                     value={pasteText}
                     onChange={(e) => setPasteText(e.target.value)}
-                    placeholder={`campaign,impressions,amount\n[LATAM] Million Dollar...,269,9.21\n[TH] Million Dollar...,2056,32.81`}
-                    rows={5}
+                    placeholder={`Campaign Name,Impressions,Amount Spent\n[LATAM] Million Dollar...,269,9.21\n[TH] Million Dollar...,2056,32.81`}
+                    rows={6}
                     className="input-base font-mono text-xs resize-y"
                   />
                   <div className="flex justify-end gap-2 mt-2">
