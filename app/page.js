@@ -284,7 +284,17 @@ export default function ReceiptGeneratorPage() {
 
   // === Generate ===
   const generateRandomRef = () => Math.random().toString(36).slice(2, 12).toUpperCase();
-  const generateRandomTxn = () => `${Date.now()}${Math.floor(Math.random() * 1e16)}`.slice(0, 35);
+  // Meta transaction IDs are formatted as two 17-digit numbers joined by a hyphen,
+  // e.g. "26907590175595082-26986223884398370". This generates a matching format.
+  const generateRandomTxn = () => {
+    const seventeenDigits = () => {
+      // First digit 1-9 (no leading zero), rest 0-9
+      let s = String(Math.floor(Math.random() * 9) + 1);
+      for (let i = 0; i < 16; i++) s += Math.floor(Math.random() * 10);
+      return s;
+    };
+    return `${seventeenDigits()}-${seventeenDigits()}`;
+  };
   const generateRandomInvoice = () => `FBADS-${Math.floor(Math.random() * 900) + 100}-${Math.floor(Math.random() * 900000000) + 100000000}`;
 
   const handleGenerate = async () => {
