@@ -153,148 +153,122 @@ export default function ReceiptGeneratorPage() {
     );
   };
 
-  // === CSV/TSV/file import handler ===
-  // Smart parser: handles files, pastes, comma/tab/semicolon delimiters, and
-  // a wide variety of header names from real exports (Meta Ads Manager,
-  // spreadsheets, etc.). Falls back to positional mapping if no headers found.
-  const parseAndImport = (rawText) => {
-    if (!rawText || !rawText.trim()) {
-      alert("Nothing to import. Paste data or pick a file first.");
-      return;
-    }
+  // File upload handler — reads the file and pipes its text into the same
+  // parser that handles paste.
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = String(ev.target?.result || "");
+      processCSV(text);
+    };
+    reader.readAsText(file);
+    e.target.value = ""; // reset so re-uploading the same file works
+  };
 
+  // === CSV/TSV parser ===
+  // Accepts comma or tab separated. Auto-detects column order.
+  // Recognizes both simple headers (campaign, impressions, amount) and Meta Ads
+  // Manager's actual export headers ("Campaign name", "Amount spent (MYR)", etc.).
+  const processCSV = (text) => {
+    if (!text.trim()) return;
     try {
-      // Auto-detect delimiter from the first line: tab > semicolon > comma
-      const firstLine = rawText.split(/\r?\n/)[0];
+      // Detect delimiter: if more tabs than commas in first line, use tab
+      const firstLine = text.split("\n")[0];
       const tabCount = (firstLine.match(/\t/g) || []).length;
-      const semiCount = (firstLine.match(/;/g) || []).length;
       const commaCount = (firstLine.match(/,/g) || []).length;
-      let delimiter = ",";
-      if (tabCount > commaCount && tabCount > semiCount) delimiter = "\t";
-      else if (semiCount > commaCount) delimiter = ";";
+      const delimiter = tabCount > commaCount ? "\t" : ",";
 
-      const parsed = Papa.parse(rawText.trim(), {
+      const parsed = Papa.parse(text.trim(), {
         delimiter,
-        skipEmptyLines: "greedy",
+        skipEmptyLines: true,
       });
 
-      const rows = parsed.data.filter((r) => r.some((c) => String(c).trim() !== ""));
+      const rows = parsed.data;
       if (!rows.length) {
-        alert("No data rows found. The file/paste might be empty or in a format I don't recognize.");
+        alert("No data found.");
         return;
       }
 
-      // Substring-based header detection — works with "Campaign Name", "Amount Spent (MYR)", etc.
-      const matchesAny = (text, patterns) => {
-        const t = String(text).toLowerCase().trim();
-        return patterns.some((p) => t === p || t.includes(p));
-      };
-      const detectColumn = (headerRow, patterns) => {
-        return headerRow.findIndex((h) => matchesAny(h, patterns));
-      };
+      // Detect header row (lenient — looks for any cell containing key terms)
+      const firstRow = rows[0].map((c) => String(c).toLowerCase().trim());
+      const hasHeader = firstRow.some((c) =>
+        c.includes("campaign") || c.includes("impression") ||
+        c.includes("amount") || c.includes("spend") || c.includes("spent") ||
+        c === "name"
+      );
 
-      const headerCandidate = rows[0].map((c) => String(c).toLowerCase().trim());
-
-      // Try to map columns by name first
-      const namedMap = {
-        campaign: detectColumn(headerCandidate, ["campaign name", "campaign", "ad set name", "ad name", "name"]),
-        impressions: detectColumn(headerCandidate, ["impressions", "impr.", "impr", "imp"]),
-        amount: detectColumn(headerCandidate, ["amount spent", "amount", "spend", "spent", "cost", "total spent"]),
-        notes: detectColumn(headerCandidate, ["notes", "note", "ad set", "label"]),
-      };
-
-      // Header row is real if at least campaign + amount columns were found by name
-      const hasHeader = namedMap.campaign >= 0 && namedMap.amount >= 0;
-
-      let columnMap;
-      let dataRows;
+      let dataRows = hasHeader ? rows.slice(1) : rows;
+      let columnMap = { campaign: 0, impressions: 1, amount: 2, notes: 3 };
 
       if (hasHeader) {
-        columnMap = namedMap;
-        dataRows = rows.slice(1);
-      } else {
-        // Fall back to positional: assume order is [campaign, impressions, amount, notes]
-        // Try to be smart: if first column has letters and second/third are numeric,
-        // we're probably looking at data without a header
-        columnMap = { campaign: 0, impressions: 1, amount: 2, notes: 3 };
-        dataRows = rows;
+        // First match wins — order matters. Each helper finds the first cell
+        // matching any of the given predicates, in priority order.
+        const find = (...preds) => {
+          for (const pred of preds) {
+            const i = firstRow.findIndex(pred);
+            if (i >= 0) return i;
+          }
+          return -1;
+        };
+        columnMap = {
+          campaign: find(
+            (h) => h === "campaign name" || h === "campaign_name",
+            (h) => h.includes("campaign") && h.includes("name"),
+            (h) => h === "campaign" || h === "name" || h === "ad set name",
+            (h) => h.includes("campaign"),
+          ),
+          impressions: find(
+            (h) => h === "impressions" || h === "impr",
+            (h) => h.includes("impression"),
+          ),
+          amount: find(
+            (h) => h.startsWith("amount spent"),
+            (h) => h === "amount" || h === "spend" || h === "spent",
+            (h) => h.includes("amount") && !h.includes("budget"),
+          ),
+          notes: find(
+            (h) => h === "notes" || h === "note" || h === "ad set name",
+          ),
+        };
       }
 
-      // Build the new rows
       const newRows = dataRows
+        .filter((r) => r[columnMap.campaign])
         .map((r) => ({
+          id: crypto.randomUUID(),
           campaign: String(r[columnMap.campaign] || "").trim(),
-          // Strip thousands separators and units from numbers
-          impressions: columnMap.impressions >= 0
-            ? String(r[columnMap.impressions] || "").replace(/[^0-9.\-]/g, "")
-            : "",
-          amount: columnMap.amount >= 0
-            ? String(r[columnMap.amount] || "").replace(/[^0-9.\-]/g, "")
-            : "",
+          impressions: columnMap.impressions >= 0 ? String(r[columnMap.impressions] || "").replace(/[,\s]/g, "") : "",
+          amount: columnMap.amount >= 0 ? String(r[columnMap.amount] || "").replace(/[^0-9.\-]/g, "") : "",
           notes: columnMap.notes >= 0 ? String(r[columnMap.notes] || "").trim() : "",
         }))
-        .filter((r) => r.campaign && r.amount); // must have at least name + amount
+        .filter((r) => r.campaign && parseFloat(r.amount) > 0);
 
       if (!newRows.length) {
-        // Provide a helpful diagnostic
-        const sampleHeader = rows[0].slice(0, 6).join(" | ");
-        const sampleData = rows[1] ? rows[1].slice(0, 6).join(" | ") : "(no data row)";
         alert(
-          "Couldn't extract any rows.\n\n" +
-          `Detected delimiter: "${delimiter === "\t" ? "TAB" : delimiter}"\n` +
-          `Header row: ${sampleHeader}\n` +
-          `First data row: ${sampleData}\n\n` +
-          "Make sure your data has at least:\n" +
-          "• A column named 'Campaign' / 'Campaign Name' / 'Name'\n" +
-          "• A column named 'Amount' / 'Spend' / 'Amount Spent'\n\n" +
-          "Or, if no headers, put columns in this order:\n" +
-          "campaign, impressions, amount, notes"
+          "Couldn't parse any rows. The CSV needs a campaign-name column and an amount-spent column with values > 0."
         );
         return;
       }
 
-      setCampaigns(newRows.map((r) => ({ ...r, id: crypto.randomUUID() })));
+      setCampaigns(newRows);
       setPasteText("");
       setShowPasteArea(false);
       setSavedToast(true);
-      setTimeout(() => setSavedToast(false), 2500);
+      setTimeout(() => setSavedToast(false), 2000);
     } catch (err) {
-      console.error("CSV parse error:", err);
       alert("Parse error: " + (err?.message || err));
     }
   };
 
-  // Paste-button handler
-  const handlePaste = () => parseAndImport(pasteText);
+  // Paste button — delegates to processCSV with the textarea contents
+  const handlePaste = () => processCSV(pasteText);
 
-  // File-upload handler — reads .csv / .tsv / .txt as text and runs through parser
-  const handleFileUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const text = await file.text();
-      parseAndImport(text);
-    } catch (err) {
-      alert("Could not read file: " + (err?.message || err));
-    } finally {
-      // Reset the input so the same file can be re-uploaded
-      e.target.value = "";
-    }
-  };
 
   // === Generate ===
   const generateRandomRef = () => Math.random().toString(36).slice(2, 12).toUpperCase();
-  // Meta transaction IDs are formatted as two 17-digit numbers joined by a hyphen,
-  // e.g. "26907590175595082-26986223884398370". This generates a matching format.
-  const generateRandomTxn = () => {
-    const seventeenDigits = () => {
-      // First digit 1-9 (no leading zero), rest 0-9
-      let s = String(Math.floor(Math.random() * 9) + 1);
-      for (let i = 0; i < 16; i++) s += Math.floor(Math.random() * 10);
-      return s;
-    };
-    return `${seventeenDigits()}-${seventeenDigits()}`;
-  };
+  const generateRandomTxn = () => `${Date.now()}${Math.floor(Math.random() * 1e16)}`.slice(0, 35);
   const generateRandomInvoice = () => `FBADS-${Math.floor(Math.random() * 900) + 100}-${Math.floor(Math.random() * 900000000) + 100000000}`;
 
   const handleGenerate = async () => {
@@ -576,12 +550,15 @@ export default function ReceiptGeneratorPage() {
                   <span className="text-[11px] font-normal text-slate-500">({campaigns.filter((r) => r.campaign).length})</span>
                 </h2>
                 <div className="flex gap-2 flex-wrap">
-                  <label className="text-[11px] px-2.5 py-1.5 rounded-md bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center gap-1.5 cursor-pointer">
+                  <label
+                    className="text-[11px] px-2.5 py-1.5 rounded-md bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center gap-1.5 cursor-pointer"
+                    title="Upload a CSV file exported from Meta Ads Manager"
+                  >
                     <Upload className="w-3 h-3" />
                     Upload CSV
                     <input
                       type="file"
-                      accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values,text/plain"
+                      accept=".csv,.tsv,.txt"
                       onChange={handleFileUpload}
                       className="hidden"
                     />
@@ -607,14 +584,15 @@ export default function ReceiptGeneratorPage() {
               {showPasteArea && (
                 <div className="mb-4 p-3 bg-slate-900/40 border border-slate-800/60 rounded-lg">
                   <p className="text-[11px] text-slate-400 mb-2">
-                    Paste CSV, TSV (tab-separated), or copy-paste from Excel/Google Sheets.
-                    Auto-detects delimiter and header row. Recognized columns: <code className="text-cyan-300">Campaign / Campaign Name / Name</code>, <code className="text-cyan-300">Impressions</code>, <code className="text-cyan-300">Amount / Spend / Amount Spent</code>, <code className="text-cyan-300">Notes</code> (optional).
+                    Paste CSV/TSV or upload a file. Works with Meta Ads Manager exports
+                    (columns like "Campaign name", "Amount spent (MYR)", "Impressions")
+                    or simple <span className="font-mono">campaign,impressions,amount</span> format.
                   </p>
                   <textarea
                     value={pasteText}
                     onChange={(e) => setPasteText(e.target.value)}
-                    placeholder={`Campaign Name,Impressions,Amount Spent\n[LATAM] Million Dollar...,269,9.21\n[TH] Million Dollar...,2056,32.81`}
-                    rows={6}
+                    placeholder={`campaign,impressions,amount\n[LATAM] Million Dollar...,269,9.21\n[TH] Million Dollar...,2056,32.81`}
+                    rows={5}
                     className="input-base font-mono text-xs resize-y"
                   />
                   <div className="flex justify-end gap-2 mt-2">
